@@ -126,6 +126,103 @@ async def get_secure_resource(auth_data = Depends(fastapi_combined_auth)):
     }
 ```
 
+### GraphQL Integration (with Strawberry)
+```
+import strawberry
+from datetime import datetime
+from strawberry.types import Info
+from auth_middleware import (
+    JWTAuthPermission,
+    ProjectAuthPermission,
+    CombinedAuthPermission,
+    requires_jwt_auth,
+    requires_project_auth,
+    requires_combined_auth,
+    get_current_user,
+    get_current_project,
+)
+from typing import List
+
+# Example data models
+@strawberry.type
+class Message:
+    text: str
+    timestamp: datetime
+    from_user: str
+
+@strawberry.type
+class User:
+    uuid: str
+    email: str
+    name: str
+
+@strawberry.type
+class Query:
+    # Project-protected field using permission_classes
+    @strawberry.field(permission_classes=[ProjectAuthPermission])
+    def hello(self, info: Info, name: str = "World") -> str:
+        project_data = get_current_project(info)
+        return f"Hello {name}! This is a public endpoint. {project_data}"
+    
+    # JWT-protected field using permission_classes
+    @strawberry.field(permission_classes=[JWTAuthPermission])
+    def whoami(self, info: Info) -> User:
+        user_data = get_current_user(info)
+        return User(
+            uuid=user_data["uuid"],
+            email=user_data["email"],
+            name=user_data["name"]
+        )
+    
+    # Project-protected field using decorator
+    @strawberry.field
+    @requires_project_auth
+    async def hello_1(self, info: Info, name: str = "World_1") -> str:
+        project_data = get_current_project(info)
+        return f"Hello {name}! This is a public endpoint. {project_data}"
+    
+    # JWT-protected field using decorator
+    @strawberry.field
+    @requires_jwt_auth
+    async def my_messages(self, info: Info) -> List[Message]:
+        user = get_current_user(info)
+        messages = [
+            Message(
+                text="Welcome to the authenticated area!",
+                timestamp=datetime.now(),
+                from_user="System"
+            ),
+            Message(
+                text=f"Hello {user['name']}, you are authenticated!",
+                timestamp=datetime.now(),
+                from_user="System"
+            ),
+            Message(
+                text="Your JWT token is valid",
+                timestamp=datetime.now(),
+                from_user="Auth Service"
+            )
+        ]
+        return messages
+
+    # Combined auth using decorator
+    @strawberry.field
+    @requires_combined_auth
+    async def hello_2(self, info: Info, name: str = "World_2") -> str:
+        user = info.context["user"]
+        project = info.context["project"]
+        return f"Hello {user['name']}! This is a public endpoint. {project}"
+    
+    # Combined auth using permission_classes
+    @strawberry.field(permission_classes=[CombinedAuthPermission])
+    async def hello_3(self, info: Info, name: str = "World_3") -> str:
+        user = info.context["user"]
+        project = info.context["project"]
+        return f"Hello {user['name']}! This is a public endpoint. {project}"
+
+schema = strawberry.Schema(query=Query)```
+
+
 ### GraphQL Integration (with Graphene)
 
 ```python
