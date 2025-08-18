@@ -6,7 +6,6 @@ import hashlib
 import time
 import requests
 import logging
-from typing import Dict, Optional
 from .types import AuthenticatedRequest, Project
 from .utils.redis_connection import get_redis
 

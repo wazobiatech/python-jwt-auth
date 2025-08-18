@@ -10,6 +10,7 @@ from strawberry.extensions import Extension
 from .jwt_guard import JwtAuthMiddleware
 from .project_guard import ProjectAuthMiddleware
 from .types import AuthenticatedRequest, AuthUser, Project
+from graphql import GraphQLError
 import logging
 import inspect
 
@@ -59,43 +60,33 @@ class JWTAuthPermission(BasePermission):
 
 
 class ProjectAuthPermission(BasePermission):
-    """
-    Strawberry permission class for Project authentication
-    
-    Usage:
-        @strawberry.field(permission_classes=[ProjectAuthPermission])
-        def project_data(self) -> str:
-            return "Project specific data"
-    """
     message = "Project is not authenticated"
-    
-    async def has_permission(
-        self, 
-        source: Any, 
-        info: Info, 
-        **kwargs
-    ) -> bool:
-        """Check if request has valid project credentials"""
+
+    async def has_permission(self, source: Any, info: Info, **kwargs) -> bool:
         try:
-            # Get request from context
+            headers = info.context["request"].headers
+
+            if not headers.get("x-app-id") or not headers.get("x-app-secret") or not headers.get("x-service-id"):
+                raise GraphQLError("Unauthorized: Missing API key (x-app-id), secret (x-app-secret), or service ID (x-service-id)")
+
             request = info.context.get("request")
             if not request:
-                return False
-            
-            # Create authenticated request wrapper
+                raise GraphQLError("Request not found in context")
+
             auth_req = AuthenticatedRequest(request)
-            
-            # Authenticate with Project
             project_auth = ProjectAuthMiddleware()
             await project_auth.authenticate(auth_req)
-            
-            # Store project in context for later use
+
             info.context["project"] = auth_req.project
-            
             return True
+
+        except GraphQLError as gql_err:
+            # Reraise so client gets detailed error
+            raise gql_err
         except Exception as e:
+            # Fallback for unexpected errors
             logger.error(f"Project authentication failed: {e}")
-            return False
+            raise GraphQLError(f"Unauthorized: {e}")
 
 
 class CombinedAuthPermission(BasePermission):
@@ -206,36 +197,26 @@ def requires_project_auth(func):
             return f"Project: {project['projectName']}"
     """
     @functools.wraps(func)
-    async def wrapper(*args, **kwargs):
-        # Find the Info instance in args or kwargs
-        info = next((a for a in args if isinstance(a, Info)), None)
-        if info is None:
-            info = kwargs.get("info")
-        if info is None:
-            raise Exception("Info object not found in resolver arguments")
-
-        # Handle context as dict or object
-        context = info.context
-        if hasattr(context, "get"):
-            request = context.get("request")
-        else:
-            request = getattr(context, "request", None)
-
+    async def wrapper(*args, info: Info, **kwargs):
+        request = getattr(info.context, "request", None) or info.context.get("request")
         if not request:
-            raise Exception("Request not found in context")
+            raise GraphQLError("Request not found in context")
 
-        # Authenticate project
+        # Authenticate
         auth_req = AuthenticatedRequest(request)
         project_auth = ProjectAuthMiddleware()
-        await project_auth.authenticate(auth_req)
+        try:
+            await project_auth.authenticate(auth_req)
+        except Exception as e:
+            raise GraphQLError(f"Unauthorized: {e}")
 
-        # Store project in context
-        if hasattr(context, "__setitem__"):
-            context["project"] = auth_req.project
+        # Store project on context
+        if isinstance(info.context, dict):
+            info.context["project"] = auth_req.project
         else:
-            setattr(context, "project", auth_req.project)
+            setattr(info.context, "project", auth_req.project)
 
-        return await func(*args, **kwargs)
+        return await func(*args, info=info, **kwargs)
     return wrapper
 
 

@@ -308,7 +308,8 @@ class JwtAuthMiddleware:
                 raw_token,
                 public_key,
                 algorithms=['RS512'],
-                options={'verify_exp': True, "verify_aud": False}
+                options={'verify_exp': True, "verify_aud": False},
+                audience=None
             )
             
             if not verified or not isinstance(verified, dict):
