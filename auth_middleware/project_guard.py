@@ -23,7 +23,7 @@ class ProjectAuthMiddleware:
     
     async def authenticate(self, req: AuthenticatedRequest) -> None:
         """
-        Authenticate project using x-app-id and x-app-secret headers
+        Authenticate project using x-app-id, x-app-secret and x-service-id headers
         
         Args:
             req: AuthenticatedRequest object
