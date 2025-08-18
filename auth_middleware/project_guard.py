@@ -34,21 +34,22 @@ class ProjectAuthMiddleware:
         headers = req.headers
         api_key = headers.get('x-app-id')
         secret = headers.get('x-app-secret')
+        service = headers.get('x-service-id')
         
-        if not api_key or not secret:
+        if not api_key or not secret or not service:
             logger.warning(f"Missing headers - x-app-id: {bool(api_key)}, x-app-secret: {bool(secret)}")
             logger.warning(f"Available headers: {list(headers.keys())}")
-            raise Exception("Missing API key (x-app-id) or secret (x-app-secret) in headers")
+            raise Exception("Missing API key (x-app-id) or secret (x-app-secret) or (x-service-id) in headers")
         
         try:
             # Check cache first
             redis = await get_redis()
-            cache_key = f"project:{api_key}:{secret}"
+            cache_key = f"project:{api_key}:{secret}:{service}"
             project_data = await redis.get(cache_key)
             
             if not project_data:
                 logger.info("Cache miss - verifying with Athens")
-                verified_data = await self._verify_with_athens(api_key, secret)
+                verified_data = await self._verify_with_athens(api_key, secret, service)
                 
                 # Cache for configured time
                 await redis.set(
@@ -67,7 +68,7 @@ class ProjectAuthMiddleware:
             logger.error(f"Project authentication failed: {str(e)}")
             raise Exception(f"Invalid API credentials: {str(e)}")
     
-    async def _verify_with_athens(self, app_id: str, secret: str) -> Project:
+    async def _verify_with_athens(self, app_id: str, secret: str, service: str) -> Project:
         """
         Verify credentials with Athens service
         
@@ -81,7 +82,7 @@ class ProjectAuthMiddleware:
         Raises:
             Exception: If verification fails
         """
-        credentials = base64.b64encode(f"{app_id}:{secret}".encode()).decode()
+        credentials = base64.b64encode(f"{app_id}:{secret}:{service}".encode()).decode()
         
         timestamp = str(int(time.time() * 1000))
         signature_input = f"GET/auth{timestamp}"
