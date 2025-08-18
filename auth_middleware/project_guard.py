@@ -37,7 +37,7 @@ class ProjectAuthMiddleware:
         service = headers.get('x-service-id')
         
         if not api_key or not secret or not service:
-            logger.warning(f"Missing headers - x-app-id: {bool(api_key)}, x-app-secret: {bool(secret)}")
+            logger.warning(f"Missing headers - x-app-id: {bool(api_key)}, x-app-secret: {bool(secret)}, x-service-id: {bool(service)}")
             logger.warning(f"Available headers: {list(headers.keys())}")
             raise Exception("Missing API key (x-app-id) or secret (x-app-secret) or (x-service-id) in headers")
         
