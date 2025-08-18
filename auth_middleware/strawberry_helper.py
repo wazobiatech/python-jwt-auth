@@ -58,7 +58,6 @@ class JWTAuthPermission(BasePermission):
             logger.error(f"JWT authentication failed: {e}")
             return False
 
-
 class ProjectAuthPermission(BasePermission):
     message = "Project is not authenticated"
 
@@ -87,7 +86,6 @@ class ProjectAuthPermission(BasePermission):
             # Fallback for unexpected errors
             logger.error(f"Project authentication failed: {e}")
             raise GraphQLError(f"Unauthorized: {e}")
-
 
 class CombinedAuthPermission(BasePermission):
     """
@@ -132,7 +130,6 @@ class CombinedAuthPermission(BasePermission):
             logger.error(f"Combined authentication failed: {e}")
             return False
 
-
 class AuthenticationExtension(Extension):
     """
     Strawberry extension for authentication
@@ -150,7 +147,6 @@ class AuthenticationExtension(Extension):
     async def on_request_end(self):
         """Called at the end of request"""
         pass
-
 
 # Decorator-based authentication for Strawberry resolvers
 def requires_jwt_auth(func):
@@ -183,7 +179,6 @@ def requires_jwt_auth(func):
 
         return await func(*args, **kwargs)
     return wrapper
-
 
 def requires_project_auth(func):
     """
@@ -218,7 +213,6 @@ def requires_project_auth(func):
 
         return await func(*args, info=info, **kwargs)
     return wrapper
-
 
 def requires_combined_auth(func: Callable) -> Callable:
     """
@@ -264,22 +258,18 @@ def requires_combined_auth(func: Callable) -> Callable:
 
     return wrapper
 
-
 # Helper functions to get auth data from context
 def get_current_user(info: Info) -> Optional[AuthUser]:
     """Get current authenticated user from context"""
     return info.context.get("user")
 
-
 def get_current_project(info: Info) -> Optional[Project]:
     """Get current authenticated project from context"""
     return info.context.get("project")
 
-
 def is_authenticated(info: Info) -> bool:
     """Check if user is authenticated"""
     return "user" in info.context
-
 
 def is_project_authenticated(info: Info) -> bool:
     """Check if project is authenticated"""
