@@ -6,13 +6,11 @@ import hmac
 import hashlib
 import time
 import logging
-from typing import Dict, Optional, Any
-from datetime import datetime, timezone
+from typing import Dict, Optional, Any, Tuple
 import jwt
 import requests
-from jose import jwk, jwt as jose_jwt
-from jose.exceptions import JWTError
-from .types import AuthenticatedRequest, AuthUser, JwtPayload, JwtPayloadSub
+from jose import jwk
+from .types import AuthenticatedRequest, AuthUser
 from .utils.redis_connection import get_redis
 
 logger = logging.getLogger(__name__)
@@ -25,8 +23,6 @@ class JwtAuthMiddleware:
         domain = os.getenv('MERCURY_BASE_URL', 'http://localhost:4000')
         self.expected_issuer = domain
         self.jwks_cache: Dict[str, Dict[str, Any]] = {}
-        self._current_raw_token: Optional[str] = None
-        self._path: Optional[str] = None
         self.signature_secret = os.getenv('SIGNATURE_SHARED_SECRET', '')
         self.cache_expiry_time = int(os.getenv('CACHE_EXPIRY_TIME', '3600'))
         self.default_project_uuid = os.getenv('ATHENS_PROJECT_UUID')
@@ -50,8 +46,6 @@ class JwtAuthMiddleware:
         
         if not token:
             raise Exception('No token provided')
-        
-        self._current_raw_token = token
         
         try:
             # Get signing key from JWKS
@@ -93,15 +87,15 @@ class JwtAuthMiddleware:
         except Exception:
             return None
     
-    def _get_jwks_uri(self, project_uuid: Optional[str]) -> str:
+    def _get_jwks_uri_and_path(self, project_uuid: Optional[str]) -> Tuple[str, str]:
         """
-        Get JWKS URI for project
+        Get JWKS URI and path for project
         
         Args:
             project_uuid: Project UUID
             
         Returns:
-            JWKS endpoint URI
+            Tuple of (URI, path)
             
         Raises:
             Exception: If no project UUID available
@@ -109,23 +103,25 @@ class JwtAuthMiddleware:
         domain = os.getenv('MERCURY_BASE_URL', 'http://localhost:4000')
         
         if project_uuid:
-            self._path = f"auth/projects/{project_uuid}/.well-known/jwks.json"
-            return f"{domain}/{self._path}"
+            path = f"auth/projects/{project_uuid}/.well-known/jwks.json"
         else:
             if not self.default_project_uuid:
                 raise Exception(
                     'No project UUID found in token and no default project UUID configured'
                 )
             
-            self._path = f"auth/projects/{self.default_project_uuid}/.well-known/jwks.json"
-            return f"{domain}/{self._path}"
+            path = f"auth/projects/{self.default_project_uuid}/.well-known/jwks.json"
+        
+        uri = f"{domain}/{path}"
+        return uri, path
     
-    async def _fetch_jwks(self, jwks_uri: str) -> Dict[str, Any]:
+    async def _fetch_jwks(self, jwks_uri: str, path: str) -> Dict[str, Any]:
         """
         Fetch JWKS from endpoint
         
         Args:
             jwks_uri: JWKS endpoint URI
+            path: Request path for signature
             
         Returns:
             JWKS key store
@@ -135,7 +131,7 @@ class JwtAuthMiddleware:
         """
         try:
             timestamp = str(int(time.time() * 1000))
-            signature_input = f"GET/{self._path}{timestamp}"
+            signature_input = f"GET/{path}{timestamp}"
             
             signature = hmac.new(
                 self.signature_secret.encode(),
@@ -201,7 +197,7 @@ class JwtAuthMiddleware:
             
             kid = header['kid']
             project_uuid = self._decode_jwt_token_for_project_uuid(raw_jwt_token)
-            jwks_uri = self._get_jwks_uri(project_uuid)
+            jwks_uri, path = self._get_jwks_uri_and_path(project_uuid)
             
             cache_key = project_uuid or 'default'
             
@@ -212,14 +208,14 @@ class JwtAuthMiddleware:
                     jwks_data = cached_entry['keystore']
                 else:
                     # Cache expired, fetch new
-                    jwks_data = await self._fetch_jwks(jwks_uri)
+                    jwks_data = await self._fetch_jwks(jwks_uri, path)
                     self.jwks_cache[cache_key] = {
                         'keystore': jwks_data,
                         'expiry': time.time() + 600  # 10 minutes
                     }
             else:
                 # Not in cache, fetch
-                jwks_data = await self._fetch_jwks(jwks_uri)
+                jwks_data = await self._fetch_jwks(jwks_uri, path)
                 self.jwks_cache[cache_key] = {
                     'keystore': jwks_data,
                     'expiry': time.time() + 600  # 10 minutes
@@ -244,13 +240,17 @@ class JwtAuthMiddleware:
         except Exception as e:
             raise Exception(f"Unable to get signing key: {str(e)}")
     
+    def _create_token_cache_key(self, raw_token: str) -> str:
+        """Create token cache key - matches Node.js SHA256 implementation"""
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()[:32]
+        return f"validated_token:{token_hash}"
+    
     async def _cache_validated_token(self, payload: Dict[str, Any], raw_token: str) -> None:
         """Cache validated token"""
         try:
             redis = await get_redis()
             
-            token_hash = base64.b64encode(raw_token.encode()).decode()[:32]
-            cache_key = f"validated_token:{token_hash}"
+            cache_key = self._create_token_cache_key(raw_token)
             
             await redis.set(cache_key, payload, {'EX': self.cache_expiry_time})
         except Exception as e:
@@ -261,8 +261,7 @@ class JwtAuthMiddleware:
         try:
             redis = await get_redis()
             
-            token_hash = base64.b64encode(raw_token.encode()).decode()[:32]
-            cache_key = f"validated_token:{token_hash}"
+            cache_key = self._create_token_cache_key(raw_token)
             
             cached_payload = await redis.get(cache_key)
             
