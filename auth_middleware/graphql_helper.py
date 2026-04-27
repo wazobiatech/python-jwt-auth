@@ -1,4 +1,5 @@
 # auth_middleware/graphql_helper.py
+import os
 import functools
 from typing import Any, Callable, Optional, Dict
 from graphql import GraphQLResolveInfo
@@ -6,12 +7,14 @@ from .jwt_guard import JwtAuthMiddleware
 from .project_guard import ProjectAuthMiddleware
 from .types import GqlContext, AuthenticatedRequest
 
+_DEFAULT_SERVICE_NAME = os.getenv('SERVICE_NAME', 'default')
+
 
 class GraphQLAuthHelper:
     """GraphQL authentication helper for resolvers"""
     
-    def __init__(self):
-        self.project_auth = ProjectAuthMiddleware()
+    def __init__(self, service_name: Optional[str] = None):
+        self.project_auth = ProjectAuthMiddleware(service_name or _DEFAULT_SERVICE_NAME)
         self.jwt_auth = JwtAuthMiddleware()
     
     async def authorize(

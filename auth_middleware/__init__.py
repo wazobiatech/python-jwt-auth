@@ -42,10 +42,18 @@ from .types import (
     Project,
     AuthenticatedRequest,
     GqlContext,
-    JwtPayload
+    JwtPayload,
+    PlatformTokenPayload,
+    ProjectTokenPayload,
+    UserTokenPayload,
+    ServiceTokenPayload,
+    PlatformContext,
+    ProjectContext,
+    ServiceContext,
 )
+from .services import generate_token, get_service_by_id, clear_cache
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 __all__ = [
     # Core middleware
@@ -68,12 +76,26 @@ __all__ = [
     'fastapi_jwt_auth',
     'fastapi_combined_auth',
     
-    # Types
+    # Types — token payloads
+    'PlatformTokenPayload',
+    'ProjectTokenPayload',
+    'UserTokenPayload',
+    'ServiceTokenPayload',
+
+    # Types — context
+    'PlatformContext',
+    'ProjectContext',
+    'ServiceContext',
     'AuthUser',
     'Project',
     'AuthenticatedRequest',
     'GqlContext',
     'JwtPayload',
+
+    # Services
+    'generate_token',
+    'get_service_by_id',
+    'clear_cache',
 
     # Strawberry helpers
     'get_current_user',
@@ -86,5 +108,5 @@ __all__ = [
     'JWTAuthPermission',
     'ProjectAuthPermission',
     'CombinedAuthPermission',
-    'AuthenticationExtension'
+    'AuthenticationExtension',
 ]

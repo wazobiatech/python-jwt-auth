@@ -25,7 +25,6 @@ class JwtAuthMiddleware:
         self.jwks_cache: Dict[str, Dict[str, Any]] = {}
         self.signature_secret = os.getenv('SIGNATURE_SHARED_SECRET', '')
         self.cache_expiry_time = int(os.getenv('CACHE_EXPIRY_TIME', '3600'))
-        self.default_project_uuid = os.getenv('ATHENS_PROJECT_UUID')
     
     async def authenticate(self, req: AuthenticatedRequest) -> None:
         """
@@ -54,64 +53,69 @@ class JwtAuthMiddleware:
             # Validate token
             user = await self._validate(token, public_key)
             
-            req.user = user
+            logger.info('[JWT-DEBUG] Token validation successful', extra={
+                'uuid': user.get('uuid'),
+                'email': user.get('email'),
+                'permissions_length': len(user.get('permissions', [])),
+            })
             
-            logger.info(f"JWT authenticated user: {user['email']}")
+            req.user = {
+                **user,
+                'tenant_id': user.get('tenant_id', ''),
+                'permissions': user.get('permissions', []),
+                'token_id': user.get('token_id', ''),
+            }
             
         except Exception as e:
             logger.error(f"JWT verification failed: {str(e)}")
             raise Exception(f"Invalid JWT token: {str(e)}")
     
-    def _decode_jwt_token_for_project_uuid(self, raw_jwt_token: str) -> Optional[str]:
+    def _decode_jwt_token_for_tenant_id(self, raw_jwt_token: str) -> Optional[str]:
         """
-        Decode JWT token to extract project UUID
+        Decode JWT token to extract tenant_id
         
         Args:
             raw_jwt_token: Raw JWT token string
             
         Returns:
-            Project UUID if present, None otherwise
+            Tenant ID if present, None otherwise
         """
         try:
             parts = raw_jwt_token.split('.')
             if len(parts) != 3:
                 return None
             
-            # Decode without verification to get project_uuid
+            # Decode without verification to get tenant_id
             decoded = jwt.decode(raw_jwt_token, options={"verify_signature": False})
             
             if decoded and isinstance(decoded, dict):
-                return decoded.get('project_uuid')
+                return decoded.get('tenant_id')
             
             return None
         except Exception:
             return None
     
-    def _get_jwks_uri_and_path(self, project_uuid: Optional[str]) -> Tuple[str, str]:
+    def _get_jwks_uri_and_path(self, tenant_id: Optional[str]) -> Tuple[str, str]:
         """
-        Get JWKS URI and path for project
+        Get JWKS URI and path for tenant
         
         Args:
-            project_uuid: Project UUID
+            tenant_id: Tenant ID
             
         Returns:
             Tuple of (URI, path)
             
         Raises:
-            Exception: If no project UUID available
+            Exception: If no tenant_id available
         """
         domain = os.getenv('MERCURY_BASE_URL', 'http://localhost:4000')
         
-        if project_uuid:
-            path = f"auth/projects/{project_uuid}/.well-known/jwks.json"
-        else:
-            if not self.default_project_uuid:
-                raise Exception(
-                    'No project UUID found in token and no default project UUID configured'
-                )
-            
-            path = f"auth/projects/{self.default_project_uuid}/.well-known/jwks.json"
+        if not tenant_id:
+            raise Exception(
+                'No tenant_id found in token'
+            )
         
+        path = f"auth/projects/{tenant_id}/.well-known/jwks.json"
         uri = f"{domain}/{path}"
         return uri, path
     
@@ -196,10 +200,10 @@ class JwtAuthMiddleware:
                 raise Exception('Missing key ID (kid) in token header')
             
             kid = header['kid']
-            project_uuid = self._decode_jwt_token_for_project_uuid(raw_jwt_token)
-            jwks_uri, path = self._get_jwks_uri_and_path(project_uuid)
+            tenant_id = self._decode_jwt_token_for_tenant_id(raw_jwt_token)
+            jwks_uri, path = self._get_jwks_uri_and_path(tenant_id)
             
-            cache_key = project_uuid or 'default'
+            cache_key = tenant_id or 'default'
             
             # Check cache
             if cache_key in self.jwks_cache:
@@ -230,7 +234,7 @@ class JwtAuthMiddleware:
             
             if not key_data:
                 raise Exception(
-                    f"Key {kid} not found in JWKS for project {project_uuid or 'default'}"
+                    f"Key {kid} not found in JWKS for tenant {tenant_id or 'default'}"
                 )
             
             # Convert JWK to PEM
@@ -298,7 +302,10 @@ class JwtAuthMiddleware:
             return AuthUser(
                 uuid=sub.get('uuid'),
                 email=sub.get('email'),
-                name=sub.get('name')
+                name=sub.get('name'),
+                tenant_id=cached_payload.get('project_uuid') or cached_payload.get('tenant_id', ''),
+                permissions=cached_payload.get('permissions', []),
+                token_id=cached_payload.get('jti', ''),
             )
         
         try:
@@ -342,7 +349,8 @@ class JwtAuthMiddleware:
                     if is_revoked:
                         raise Exception('Token has been revoked')
                 except Exception as e:
-                    raise Exception(f"Redis error: {str(e)}")
+                    # Continue authentication even if Redis is unavailable
+                    logger.warning(f"Redis revocation check failed, continuing: {str(e)}")
             
             # Cache the validated token
             await self._cache_validated_token(verified, raw_token)
@@ -351,7 +359,10 @@ class JwtAuthMiddleware:
             return AuthUser(
                 uuid=sub['uuid'],
                 email=sub['email'],
-                name=sub['name']
+                name=sub['name'],
+                tenant_id=verified.get('project_uuid') or verified.get('tenant_id', ''),
+                permissions=verified.get('permissions', []),
+                token_id=verified.get('jti', ''),
             )
             
         except jwt.ExpiredSignatureError:

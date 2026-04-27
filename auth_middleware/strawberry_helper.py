@@ -2,6 +2,7 @@
 """
 Strawberry GraphQL authentication helpers
 """
+import os
 import functools
 from typing import Any, Awaitable, Callable, Optional, TypeVar, Union
 from strawberry.types import Info
@@ -9,7 +10,7 @@ from strawberry.permission import BasePermission
 from strawberry.extensions import Extension
 from .jwt_guard import JwtAuthMiddleware
 from .project_guard import ProjectAuthMiddleware
-from .types import AuthenticatedRequest, AuthUser, Project
+from .types import AuthenticatedRequest, AuthUser, ProjectContext
 from graphql import GraphQLError
 import logging
 import inspect
@@ -17,6 +18,8 @@ import inspect
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+_DEFAULT_SERVICE_NAME = os.getenv('SERVICE_NAME', 'default')
 
 
 class JWTAuthPermission(BasePermission):
@@ -63,27 +66,22 @@ class ProjectAuthPermission(BasePermission):
 
     async def has_permission(self, source: Any, info: Info, **kwargs) -> bool:
         try:
-            headers = info.context["request"].headers
-
-            if not headers.get("x-app-id") or not headers.get("x-app-secret") or not headers.get("x-service-id"):
-                raise GraphQLError("Unauthorized: Missing API key (x-app-id), secret (x-app-secret), or service ID (x-service-id)")
-
             request = info.context.get("request")
             if not request:
                 raise GraphQLError("Request not found in context")
 
             auth_req = AuthenticatedRequest(request)
-            project_auth = ProjectAuthMiddleware()
+            project_auth = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
             await project_auth.authenticate(auth_req)
 
             info.context["project"] = auth_req.project
+            info.context["platform"] = auth_req.platform
+            info.context["service_ctx"] = auth_req.service
             return True
 
         except GraphQLError as gql_err:
-            # Reraise so client gets detailed error
             raise gql_err
         except Exception as e:
-            # Fallback for unexpected errors
             logger.error(f"Project authentication failed: {e}")
             raise GraphQLError(f"Unauthorized: {e}")
 
@@ -116,7 +114,7 @@ class CombinedAuthPermission(BasePermission):
             
             # Authenticate both
             jwt_auth = JwtAuthMiddleware()
-            project_auth = ProjectAuthMiddleware()
+            project_auth = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
             
             await jwt_auth.authenticate(auth_req)
             await project_auth.authenticate(auth_req)
@@ -199,7 +197,7 @@ def requires_project_auth(func):
 
         # Authenticate
         auth_req = AuthenticatedRequest(request)
-        project_auth = ProjectAuthMiddleware()
+        project_auth = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
         try:
             await project_auth.authenticate(auth_req)
         except Exception as e:
@@ -241,7 +239,7 @@ def requires_combined_auth(func: Callable) -> Callable:
         # Authenticate
         auth_req = AuthenticatedRequest(request)
         jwt_auth = JwtAuthMiddleware()
-        project_auth = ProjectAuthMiddleware()
+        project_auth = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
 
         await jwt_auth.authenticate(auth_req)
         await project_auth.authenticate(auth_req)
@@ -263,7 +261,7 @@ def get_current_user(info: Info) -> Optional[AuthUser]:
     """Get current authenticated user from context"""
     return info.context.get("user")
 
-def get_current_project(info: Info) -> Optional[Project]:
+def get_current_project(info: Info) -> Optional[ProjectContext]:
     """Get current authenticated project from context"""
     return info.context.get("project")
 

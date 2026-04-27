@@ -1,4 +1,5 @@
 # auth_middleware/express_helper.py
+import os
 import functools
 import asyncio
 from typing import Callable, Any, Optional
@@ -8,6 +9,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from .project_guard import ProjectAuthMiddleware
 from .jwt_guard import JwtAuthMiddleware
 from .types import AuthenticatedRequest
+
+_DEFAULT_SERVICE_NAME = os.getenv('SERVICE_NAME', 'default')
 
 # Flask Middleware Decorators
 
@@ -25,7 +28,7 @@ def flask_project_auth():
     def decorator(f: Callable) -> Callable:
         @functools.wraps(f)
         def wrapper(*args, **kwargs):
-            auth_middleware = ProjectAuthMiddleware()
+            auth_middleware = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
             req = AuthenticatedRequest(FlaskRequest)
             
             try:
@@ -98,7 +101,7 @@ def flask_combined_auth():
     def decorator(f: Callable) -> Callable:
         @functools.wraps(f)
         def wrapper(*args, **kwargs):
-            project_auth = ProjectAuthMiddleware()
+            project_auth = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
             jwt_auth = JwtAuthMiddleware()
             req = AuthenticatedRequest(FlaskRequest)
             
@@ -139,7 +142,7 @@ async def fastapi_project_auth(request: FastAPIRequest):
         async def my_endpoint(project = Depends(fastapi_project_auth)):
             return project
     """
-    auth_middleware = ProjectAuthMiddleware()
+    auth_middleware = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
     req = AuthenticatedRequest(request)
     
     try:
@@ -185,7 +188,7 @@ async def fastapi_combined_auth(
             project = auth_data['project']
             return {'user': user, 'project': project}
     """
-    project_auth = ProjectAuthMiddleware()
+    project_auth = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
     jwt_auth = JwtAuthMiddleware()
     req = AuthenticatedRequest(request)
     
