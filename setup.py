@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="auth-middleware",
-    version="1.1.0",
+    version="2.0.0",
     author="Dev Wazobia",
     author_email="developer@wazobia.tech",
     description="Authentication middleware for Python services with JWT and Project authentication",
