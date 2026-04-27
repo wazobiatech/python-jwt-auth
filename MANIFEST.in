@@ -1,0 +1,8 @@
+include README.md
+include LICENSE
+include requirements.txt
+include requirements-dev.txt
+recursive-include auth_middleware *.py
+recursive-include tests *.py
+global-exclude *.pyc
+global-exclude __pycache__
