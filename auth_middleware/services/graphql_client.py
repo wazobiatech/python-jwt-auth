@@ -2,7 +2,12 @@
 """
 Lightweight GraphQL client for Mercury mutations.
 Mirrors the Node.js createApolloClient utility.
+
+The underlying HTTP library (``requests``) is synchronous; ``mutate_async``
+offloads each request to a worker thread with ``asyncio.to_thread`` so it
+does not block the event loop when called from async code.
 """
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -63,17 +68,20 @@ class GraphQLClient:
         variables: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Execute a GraphQL mutation.
+        Execute a GraphQL mutation synchronously.
+
+        Prefer ``mutate_async`` from async code paths so the event loop does
+        not block on the network round-trip.
 
         Args:
             mutation: GraphQL mutation string
             variables: Variables for the mutation
 
         Returns:
-            Dict with 'data' and optional 'errors' keys
+            The ``data`` portion of the GraphQL response (an empty dict if absent).
 
         Raises:
-            Exception: On network or GraphQL errors
+            Exception: On network or GraphQL errors.
         """
         payload: Dict[str, Any] = {'query': mutation}
         if variables is not None:
@@ -108,3 +116,11 @@ class GraphQLClient:
             raise Exception('Mercury service timeout')
         except requests.exceptions.RequestException as e:
             raise Exception(f"GraphQL request failed: {str(e)}")
+
+    async def mutate_async(
+        self,
+        mutation: str,
+        variables: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Async wrapper that runs ``mutate`` in a worker thread."""
+        return await asyncio.to_thread(self.mutate, mutation, variables)

@@ -7,14 +7,16 @@ from .jwt_guard import JwtAuthMiddleware
 from .project_guard import ProjectAuthMiddleware
 from .types import GqlContext, AuthenticatedRequest
 
-_DEFAULT_SERVICE_NAME = os.getenv('SERVICE_NAME', 'default')
+def _default_service_name() -> str:
+    """Read ``SERVICE_NAME`` lazily so dotenv / test setup can take effect."""
+    return os.getenv('SERVICE_NAME', 'default')
 
 
 class GraphQLAuthHelper:
     """GraphQL authentication helper for resolvers"""
-    
+
     def __init__(self, service_name: Optional[str] = None):
-        self.project_auth = ProjectAuthMiddleware(service_name or _DEFAULT_SERVICE_NAME)
+        self.project_auth = ProjectAuthMiddleware(service_name or _default_service_name())
         self.jwt_auth = JwtAuthMiddleware()
     
     async def authorize(

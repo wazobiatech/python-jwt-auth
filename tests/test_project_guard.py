@@ -3,7 +3,7 @@ import json
 import time
 import base64
 import jwt
-from unittest.mock import Mock, patch, AsyncMock, MagicMock
+from unittest.mock import Mock, patch, AsyncMock
 from auth_middleware.project_guard import ProjectAuthMiddleware
 from auth_middleware.types import AuthenticatedRequest
 
@@ -122,8 +122,7 @@ class TestProjectAuthMiddleware:
         mock_request.request.headers = {'x-project-token': f'Bearer {token}'}
 
         mock_redis = AsyncMock()
-        mock_redis.client = MagicMock()
-        mock_redis.client.exists.return_value = 1
+        mock_redis.exists = AsyncMock(return_value=True)
 
         with patch.object(middleware, '_get_public_key_from_cache', new_callable=AsyncMock, return_value='mock_key'):
             with patch('auth_middleware.project_guard.jwt.decode', return_value=payload):
@@ -145,8 +144,7 @@ class TestProjectAuthMiddleware:
         mock_request.request.headers = {'x-project-token': f'Bearer {token}'}
 
         mock_redis = AsyncMock()
-        mock_redis.client = MagicMock()
-        mock_redis.client.exists.return_value = 0
+        mock_redis.exists = AsyncMock(return_value=False)
 
         with patch.object(middleware, '_get_public_key_from_cache', new_callable=AsyncMock, return_value='mock_key'):
             with patch('auth_middleware.project_guard.jwt.decode', return_value=payload):
@@ -176,8 +174,7 @@ class TestProjectAuthMiddleware:
         mock_request.request.headers = {'x-project-token': f'Bearer {token}'}
 
         mock_redis = AsyncMock()
-        mock_redis.client = MagicMock()
-        mock_redis.client.exists.return_value = 1
+        mock_redis.exists = AsyncMock(return_value=True)
         mock_redis.get = AsyncMock(return_value=None)  # no cached secret version
 
         with patch.object(middleware, '_get_public_key_from_cache', new_callable=AsyncMock, return_value='mock_key'):
@@ -201,8 +198,7 @@ class TestProjectAuthMiddleware:
         mock_request.request.headers = {'x-project-token': f'Bearer {token}'}
 
         mock_redis = AsyncMock()
-        mock_redis.client = MagicMock()
-        mock_redis.client.exists.return_value = 1
+        mock_redis.exists = AsyncMock(return_value=True)
         mock_redis.get = AsyncMock(return_value=None)
 
         with patch.object(middleware, '_get_public_key_from_cache', new_callable=AsyncMock, return_value='mock_key'):
@@ -221,8 +217,7 @@ class TestProjectAuthMiddleware:
         mock_request.request.headers = {'x-project-token': f'Bearer {token}'}
 
         mock_redis = AsyncMock()
-        mock_redis.client = MagicMock()
-        mock_redis.client.exists.return_value = 1
+        mock_redis.exists = AsyncMock(return_value=True)
         # Return a higher secret version from Redis
         mock_redis.get = AsyncMock(return_value=5)
 
@@ -240,15 +235,16 @@ class TestProjectAuthMiddleware:
         mock_request.request.headers = {'x-project-token': f'Bearer {token}'}
 
         mock_redis = AsyncMock()
-        mock_redis.client = MagicMock()
-        mock_redis.client.exists.return_value = 0
+        mock_redis.exists = AsyncMock(return_value=False)
         mock_redis.get = AsyncMock(return_value=None)
 
         with patch.object(middleware, '_get_public_key_from_cache', new_callable=AsyncMock, return_value='mock_key'):
             with patch('auth_middleware.project_guard.jwt.decode', return_value=payload):
                 with patch('auth_middleware.project_guard.get_redis', new_callable=AsyncMock, return_value=mock_redis):
-                    with pytest.raises(Exception, match="Token has been revoked"):
-                        await middleware.authenticate(mock_request)
+                    with patch('auth_middleware.project_guard.generate_token', new_callable=AsyncMock, return_value='tok'):
+                        with patch('auth_middleware.project_guard.get_service_by_id', new_callable=AsyncMock, return_value='svc-uuid-1'):
+                            with pytest.raises(Exception, match="Token has been revoked"):
+                                await middleware.authenticate(mock_request)
 
     # ── Service token ────────────────────────────────────────────
 

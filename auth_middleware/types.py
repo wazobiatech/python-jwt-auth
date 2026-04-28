@@ -133,9 +133,19 @@ class ServiceTokenPayload:
 
 @dataclass
 class PlatformContext:
-    """Platform context injected onto request after platform token auth"""
+    """
+    Platform context injected onto request after platform token auth.
+
+    Fields:
+        tenant_id: Canonical tenant identifier (preferred for new code).
+        project_uuid: Backwards-compatible alias for ``tenant_id``. Deprecated;
+            consumers should migrate to ``tenant_id``.
+        scopes: Authorized scopes encoded into the platform token.
+        token_id: Unique platform token identifier (used for revocation lookups).
+        expires_at: Unix timestamp at which the token expires.
+    """
     tenant_id: str
-    project_uuid: str
+    project_uuid: str  # Deprecated alias of tenant_id; kept for backward compatibility.
     scopes: List[str]
     token_id: str
     expires_at: int
@@ -143,9 +153,21 @@ class PlatformContext:
 
 @dataclass
 class ProjectContext:
-    """Project context injected onto request after project token auth"""
+    """
+    Project context injected onto request after project token auth.
+
+    Fields:
+        tenant_id: Canonical tenant identifier (preferred for new code).
+        project_uuid: Backwards-compatible alias for ``tenant_id``. Deprecated.
+        enabled_services: Service UUIDs the project has authorized.
+        scopes: Authorized scopes encoded into the project token.
+        secret_version: Project secret rotation version; used to invalidate
+            tokens issued before a secret rotation.
+        token_id: Unique project token identifier (used for revocation lookups).
+        expires_at: Unix timestamp at which the token expires.
+    """
     tenant_id: str
-    project_uuid: str
+    project_uuid: str  # Deprecated alias of tenant_id; kept for backward compatibility.
     enabled_services: List[str]
     scopes: List[str]
     secret_version: int
@@ -155,7 +177,22 @@ class ProjectContext:
 
 @dataclass
 class ServiceContext:
-    """Service context injected onto request after service token auth"""
+    """
+    Service context injected onto request after service token auth.
+
+    Fields:
+        client_id: Service client identifier (Mercury-issued).
+        service_name: Logical service name (e.g. ``analytics``).
+        scopes: Authorized scopes (parsed from space-separated ``scope`` claim).
+        token_id: JWT ``jti`` claim identifying this token.
+        issued_at: Unix timestamp at which the token was issued.
+        expires_at: Unix timestamp at which the token expires.
+
+    Note:
+        Service tokens are stateless — they have no Redis revocation entry, so
+        a leaked service token is valid until ``expires_at``. Rotate
+        ``CLIENT_SECRET`` regularly and keep ``SERVICE_TOKEN_CACHE_TTL`` short.
+    """
     client_id: str
     service_name: str
     scopes: List[str]
@@ -194,19 +231,19 @@ class JwtPayloadSub:
 class JwtPayload:
     """
     Legacy JWT Payload structure.
-    @deprecated Use PlatformTokenPayload, ProjectTokenPayload, UserTokenPayload, or ServiceTokenPayload instead
+    @deprecated Use PlatformTokenPayload, ProjectTokenPayload, UserTokenPayload, or ServiceTokenPayload instead.
     """
-    sub: Optional[JwtPayloadSub] = None
+    sub: JwtPayloadSub
+    iss: str
+    aud: str
+    exp: int
+    iat: int
+    nbf: int
     project_uuid: Optional[str] = None
     tenant_id: Optional[str] = None
     permissions: Optional[List[str]] = None
     scopes: Optional[List[str]] = None
     type: str = ''
-    iss: str = ''
-    aud: str = ''
-    exp: int = 0
-    nbf: int = 0
-    iat: int = 0
     jti: Optional[str] = None
 
 

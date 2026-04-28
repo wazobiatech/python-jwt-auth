@@ -53,7 +53,7 @@ from .types import (
 )
 from .services import generate_token, get_service_by_id, clear_cache
 
-__version__ = '1.1.0'
+__version__ = '2.0.0'
 
 __all__ = [
     # Core middleware

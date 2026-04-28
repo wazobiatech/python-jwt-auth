@@ -5,6 +5,7 @@ import base64
 import hmac
 import hashlib
 import time
+import asyncio
 import logging
 from typing import Dict, Optional, Any, Tuple
 import jwt
@@ -72,25 +73,27 @@ class JwtAuthMiddleware:
     
     def _decode_jwt_token_for_tenant_id(self, raw_jwt_token: str) -> Optional[str]:
         """
-        Decode JWT token to extract tenant_id
-        
-        Args:
-            raw_jwt_token: Raw JWT token string
-            
+        Decode JWT token to extract tenant_id WITHOUT signature verification.
+
+        ⚠️  Returned value is UNTRUSTED. It is only used to construct the JWKS
+        URL so we can fetch the key that *should* have signed the token; if
+        the token was forged or tampered with, the subsequent ``jwt.decode``
+        with the public key will reject it.
+
         Returns:
-            Tenant ID if present, None otherwise
+            Tenant ID if present, None otherwise.
         """
         try:
             parts = raw_jwt_token.split('.')
             if len(parts) != 3:
                 return None
-            
-            # Decode without verification to get tenant_id
+
+            # Unverified decode: only used to route the JWKS lookup.
             decoded = jwt.decode(raw_jwt_token, options={"verify_signature": False})
-            
+
             if decoded and isinstance(decoded, dict):
                 return decoded.get('tenant_id')
-            
+
             return None
         except Exception:
             return None
@@ -150,7 +153,9 @@ class JwtAuthMiddleware:
                 'X-Signature': signature,
             }
             
-            response = requests.get(jwks_uri, headers=headers, timeout=10)
+            response = await asyncio.to_thread(
+                requests.get, jwks_uri, headers=headers, timeout=10
+            )
             
             if response.status_code != 200:
                 raise Exception(
@@ -198,7 +203,14 @@ class JwtAuthMiddleware:
             
             if 'kid' not in header:
                 raise Exception('Missing key ID (kid) in token header')
-            
+
+            # Defense-in-depth: ``jwt.decode`` later enforces ``algorithms=['RS512']``
+            # so a non-matching alg would already fail signature verification.
+            # Asserting here too produces clearer error messages and rejects
+            # confused-deputy attempts before we round-trip to JWKS.
+            if header.get('alg') != 'RS512':
+                raise Exception(f"Unsupported alg: {header.get('alg')}")
+
             kid = header['kid']
             tenant_id = self._decode_jwt_token_for_tenant_id(raw_jwt_token)
             jwks_uri, path = self._get_jwks_uri_and_path(tenant_id)
@@ -303,7 +315,9 @@ class JwtAuthMiddleware:
                 uuid=sub.get('uuid'),
                 email=sub.get('email'),
                 name=sub.get('name'),
-                tenant_id=cached_payload.get('project_uuid') or cached_payload.get('tenant_id', ''),
+                # Prefer the new ``tenant_id`` claim; fall back to the legacy
+                # ``project_uuid`` for tokens issued before the rename.
+                tenant_id=cached_payload.get('tenant_id') or cached_payload.get('project_uuid', ''),
                 permissions=cached_payload.get('permissions', []),
                 token_id=cached_payload.get('jti', ''),
             )
@@ -360,7 +374,8 @@ class JwtAuthMiddleware:
                 uuid=sub['uuid'],
                 email=sub['email'],
                 name=sub['name'],
-                tenant_id=verified.get('project_uuid') or verified.get('tenant_id', ''),
+                # Prefer ``tenant_id`` with ``project_uuid`` as legacy fallback.
+                tenant_id=verified.get('tenant_id') or verified.get('project_uuid', ''),
                 permissions=verified.get('permissions', []),
                 token_id=verified.get('jti', ''),
             )

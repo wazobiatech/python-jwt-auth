@@ -1,16 +1,36 @@
 # auth_middleware/project_guard.py
 """
-Redis-cached JWKS Authentication Middleware for Platform, Project & Service Tokens.
-Mirrors the Node.js ProjectAuthMiddleware (project.guard.ts).
+Redis-cached JWKS authentication middleware for platform, project & service tokens.
+
+Mirrors the Node.js ``ProjectAuthMiddleware`` (project.guard.ts).
+
+Failure-mode policy
+-------------------
+Revocation lookups (Redis) follow a single, configurable policy controlled by
+the ``REVOCATION_FAIL_OPEN`` environment variable:
+
+* ``REVOCATION_FAIL_OPEN=true``  — if Redis is unreachable, allow the token
+  through (logs a WARNING). Use only when availability is more important than
+  revocation enforcement.
+* unset / ``false`` (default)    — if Redis is unreachable, reject the token
+  (logs an ERROR). This is the secure default.
+
+The same policy applies to platform-token revocation, project-token
+revocation, and the project secret-version lookup.
+
+Service tokens are stateless — they have no Redis revocation entry. A leaked
+service token is valid until expiration; rotate ``CLIENT_SECRET`` regularly.
 """
 import os
+import re
 import json
 import time
+import asyncio
 import hmac
 import hashlib
 import base64
 import logging
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any
 
 import jwt
 import requests
@@ -29,6 +49,16 @@ from .utils.redis_connection import get_redis
 from .services.auth import generate_token, get_service_by_id
 
 logger = logging.getLogger(__name__)
+
+# Tenant ids appear in cache keys and JWKS URL paths. Restrict to a safe set
+# of characters so an attacker-controlled payload cannot inject ``:`` (key
+# collisions) or ``/`` / whitespace (path traversal) into either.
+_TENANT_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
+
+
+def _revocation_fail_open() -> bool:
+    """Read fail-open policy lazily so tests / reloads pick up env changes."""
+    return os.getenv('REVOCATION_FAIL_OPEN', 'false').lower() in ('1', 'true', 'yes')
 
 
 class ProjectAuthMiddleware:
@@ -90,7 +120,7 @@ class ProjectAuthMiddleware:
     ) -> None:
         req.platform = PlatformContext(
             tenant_id=payload.tenant_id,
-            project_uuid=payload.tenant_id,
+            project_uuid=payload.tenant_id,  # Backwards-compat alias of tenant_id.
             scopes=payload.scopes or [],
             token_id=payload.token_id,
             expires_at=payload.exp,
@@ -107,15 +137,14 @@ class ProjectAuthMiddleware:
             'enabled_services': enabled_services,
         })
 
-        # Generate a service token via Mercury (client credentials)
+        # Generate a service token via Mercury (client credentials).
+        # Both calls are cached (Redis + in-process) by services/auth.py, so
+        # the steady-state cost is one Redis read each.
         access_token = await generate_token()
-        logger.info('Access token generated', extra={
-            'access_token_preview': access_token[:20],
-        })
 
         # Resolve our own service UUID
         service_id = await get_service_by_id(access_token)
-        logger.info('Service uuid found', extra={'service_id': service_id})
+        logger.info('Service uuid resolved', extra={'service_id': service_id})
 
         if service_id not in enabled_services:
             logger.error('Service access denied', extra={
@@ -128,13 +157,9 @@ class ProjectAuthMiddleware:
                 f"Enabled services: {', '.join(enabled_services)}"
             )
 
-        logger.info('Service is enabled for this project', extra={
-            'enabled_services': enabled_services, 'service_id': service_id,
-        })
-
         req.project = ProjectContext(
             tenant_id=payload.tenant_id,
-            project_uuid=payload.tenant_id,
+            project_uuid=payload.tenant_id,  # Backwards-compat alias of tenant_id.
             enabled_services=enabled_services,
             scopes=payload.scopes or [],
             secret_version=payload.secret_version,
@@ -142,7 +167,7 @@ class ProjectAuthMiddleware:
             expires_at=payload.exp,
         )
 
-        logger.info('Project context injected successfully', extra={
+        logger.info('Project context injected', extra={
             'tenant_id': payload.tenant_id,
             'token_id': payload.token_id,
             'service_id': service_id,
@@ -162,9 +187,10 @@ class ProjectAuthMiddleware:
             issued_at=payload.iat,
             expires_at=payload.exp,
         )
-        logger.info(
-            f"Service authenticated: {payload.service_name}, scopes: {', '.join(scopes)}"
-        )
+        logger.info('Service authenticated', extra={
+            'service_name': payload.service_name,
+            'scopes': scopes,
+        })
 
     # ─────────────────────────────────────────
     # Token validation
@@ -205,18 +231,34 @@ class ProjectAuthMiddleware:
         except Exception as e:
             return {'is_valid': False, 'error': str(e)}
 
+    async def _check_revocation(self, token_key: str, token_kind: str) -> bool:
+        """
+        Return True if the token is still valid (i.e. its revocation key
+        exists in Redis). Applies the configured fail-open / fail-closed
+        policy when Redis is unreachable.
+        """
+        redis = await get_redis()
+        try:
+            return await redis.exists(token_key)
+        except Exception as e:
+            if _revocation_fail_open():
+                logger.warning(
+                    'Revocation check failed; allowing token (fail-open)',
+                    extra={'token_kind': token_kind, 'token_key': token_key, 'error': str(e)},
+                )
+                return True
+            logger.error(
+                'Revocation check failed; rejecting token (fail-closed)',
+                extra={'token_kind': token_kind, 'token_key': token_key, 'error': str(e)},
+            )
+            return False
+
     async def _validate_platform_token(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not payload.get('tenant_id') or not payload.get('token_id'):
             return {'is_valid': False, 'error': 'Invalid platform token structure'}
 
-        redis = await get_redis()
         token_key = f"platform_token:{payload['token_id']}"
-        try:
-            exists = redis.client.exists(token_key)
-        except Exception:
-            exists = 1  # Allow if Redis unavailable
-
-        if not exists:
+        if not await self._check_revocation(token_key, 'platform'):
             return {'is_valid': False, 'error': 'Token has been revoked'}
 
         return {'is_valid': True, 'payload': payload}
@@ -229,7 +271,7 @@ class ProjectAuthMiddleware:
         ):
             return {'is_valid': False, 'error': 'Invalid project token structure'}
 
-        # Check secret version
+        # Check secret version (Redis-backed; same fail-open policy).
         current_version = await self._get_current_secret_version(payload['tenant_id'])
         if current_version > 0 and payload.get('secret_version', 0) < current_version:
             return {
@@ -241,15 +283,8 @@ class ProjectAuthMiddleware:
                 ),
             }
 
-        # Check revocation
-        redis = await get_redis()
         token_key = f"project_token:{payload['token_id']}"
-        try:
-            exists = redis.client.exists(token_key)
-        except Exception:
-            exists = 1
-
-        if not exists:
+        if not await self._check_revocation(token_key, 'project'):
             return {'is_valid': False, 'error': 'Token has been revoked'}
 
         return {'is_valid': True, 'payload': payload}
@@ -278,15 +313,24 @@ class ProjectAuthMiddleware:
             if not kid:
                 raise Exception('Missing key ID in token header')
 
+            # Defense-in-depth: reject anything that does not claim RS512 in
+            # the header. ``jwt.decode`` later enforces this strictly via
+            # ``algorithms=['RS512']``, but failing fast yields clearer errors
+            # and makes the contract explicit at this layer.
+            if header.get('alg') != 'RS512':
+                raise Exception(f"Unsupported alg: {header.get('alg')}")
+
             payload = self._decode_jwt_payload(token)
 
-            # Determine JWKS endpoint and cache key based on token type
+            # Determine JWKS endpoint and cache key based on token type.
             if payload.get('type') == 'service':
                 cache_key = self.service_jwks_cache_key
                 jwks_path = 'auth/service/.well-known/jwks.json'
                 logger.info('Service token detected, using service JWKS endpoint')
             else:
                 tenant_id = payload.get('tenant_id', '')
+                if not _TENANT_ID_RE.match(tenant_id or ''):
+                    raise Exception('Invalid or missing tenant_id in token payload')
                 cache_key = f"jwks_cache:{tenant_id}"
                 jwks_path = f"auth/projects/{tenant_id}/.well-known/jwks.json"
                 logger.info(f"{payload.get('type')} token detected, tenant_id: {tenant_id}")
@@ -311,13 +355,13 @@ class ProjectAuthMiddleware:
                 if not pem:
                     raise Exception(f"Key {kid} not found even after JWKS refresh")
                 return pem
-            else:
-                logger.info('No cached JWKS found, fetching from Mercury')
-                jwks_data = await self._fetch_and_cache_jwks(jwks_path, cache_key)
-                pem = self._find_key_in_jwks(jwks_data, kid)
-                if not pem:
-                    raise Exception(f"Key {kid} not found in JWKS")
-                return pem
+
+            logger.info('No cached JWKS found, fetching from Mercury')
+            jwks_data = await self._fetch_and_cache_jwks(jwks_path, cache_key)
+            pem = self._find_key_in_jwks(jwks_data, kid)
+            if not pem:
+                raise Exception(f"Key {kid} not found in JWKS")
+            return pem
 
         except Exception as e:
             raise Exception(f"Failed to get public key: {str(e)}")
@@ -342,7 +386,9 @@ class ProjectAuthMiddleware:
         }
 
         try:
-            response = requests.get(jwks_uri, headers=headers, timeout=10)
+            response = await asyncio.to_thread(
+                requests.get, jwks_uri, headers=headers, timeout=10
+            )
 
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
@@ -380,6 +426,15 @@ class ProjectAuthMiddleware:
 
     @staticmethod
     def _decode_jwt_header(token: str) -> Dict[str, Any]:
+        """
+        Decode the JWT header without signature verification.
+
+        ⚠️  The result is UNTRUSTED until the token is verified by
+        ``jwt.decode(... algorithms=['RS512'], key=public_key)``. This helper
+        only extracts ``kid`` / ``alg`` so we can locate the correct JWKS
+        entry; do not branch on header values for security decisions before
+        signature verification has succeeded.
+        """
         parts = token.split('.')
         if len(parts) != 3:
             raise Exception('Invalid JWT format')
@@ -391,6 +446,15 @@ class ProjectAuthMiddleware:
 
     @staticmethod
     def _decode_jwt_payload(token: str) -> Dict[str, Any]:
+        """
+        Decode the JWT payload without signature verification.
+
+        ⚠️  UNTRUSTED — see ``_decode_jwt_header``. Used only to choose the
+        JWKS endpoint (service vs. tenant-scoped); the subsequent
+        ``jwt.decode`` call enforces signature, algorithm, and expiry, so
+        an attacker mis-routing the JWKS lookup gains nothing because the
+        key under their chosen endpoint will fail signature verification.
+        """
         parts = token.split('.')
         if len(parts) != 3:
             raise Exception('Invalid JWT format')
@@ -401,7 +465,13 @@ class ProjectAuthMiddleware:
         return json.loads(base64.urlsafe_b64decode(payload_b64).decode())
 
     async def _get_current_secret_version(self, tenant_id: str) -> int:
-        """Get current secret version from Redis (cached by Mercury)."""
+        """
+        Get current secret version from Redis (cached by Mercury).
+
+        Applies the fail-open policy: when ``REVOCATION_FAIL_OPEN`` is
+        enabled, a Redis error returns 0 (which means "no rotation seen,
+        accept any version"). Otherwise the failure propagates.
+        """
         try:
             redis = await get_redis()
             cache_key = f"tenant_secret_version:{tenant_id}"
@@ -412,6 +482,16 @@ class ProjectAuthMiddleware:
 
             return 0  # Default to allow if not found
         except Exception as e:
+            if _revocation_fail_open():
+                logger.warning(
+                    'Secret-version lookup failed; treating as 0 (fail-open)',
+                    extra={'tenant_id': tenant_id, 'error': str(e)},
+                )
+                return 0
+            logger.error(
+                'Secret-version lookup failed; rejecting token (fail-closed)',
+                extra={'tenant_id': tenant_id, 'error': str(e)},
+            )
             raise Exception(f"Failed to get secret version: {str(e)}")
 
     def set_cache_ttl(self, seconds: int) -> None:

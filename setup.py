@@ -8,7 +8,7 @@ setup(
     version="2.0.0",
     author="Dev Wazobia",
     author_email="developer@wazobia.tech",
-    description="Authentication middleware for Python services with JWT and Project authentication",
+    description="Authentication middleware for Python services with platform, project, and service token authentication.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="git@bitbucket.org:wazobiatech/python_auth_middleware.git",

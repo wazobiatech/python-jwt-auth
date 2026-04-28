@@ -19,7 +19,14 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-_DEFAULT_SERVICE_NAME = os.getenv('SERVICE_NAME', 'default')
+def _default_service_name() -> str:
+    """
+    Read ``SERVICE_NAME`` lazily so test setups and late ``dotenv`` loads
+    are honoured. If unset, fall back to ``'default'`` — which is a footgun
+    in production (any service-aware logic will silently misbehave); set
+    ``SERVICE_NAME`` explicitly in deployment.
+    """
+    return os.getenv('SERVICE_NAME', 'default')
 
 
 class JWTAuthPermission(BasePermission):
@@ -71,7 +78,12 @@ class ProjectAuthPermission(BasePermission):
                 raise GraphQLError("Request not found in context")
 
             auth_req = AuthenticatedRequest(request)
-            project_auth = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
+            # Surface a clean error for the missing-header case, before the
+            # middleware wraps it in the noisy "Authentication service error".
+            if not auth_req.headers.get('x-project-token'):
+                raise GraphQLError("Unauthorized: missing 'x-project-token' header")
+
+            project_auth = ProjectAuthMiddleware(_default_service_name())
             await project_auth.authenticate(auth_req)
 
             info.context["project"] = auth_req.project
@@ -114,7 +126,7 @@ class CombinedAuthPermission(BasePermission):
             
             # Authenticate both
             jwt_auth = JwtAuthMiddleware()
-            project_auth = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
+            project_auth = ProjectAuthMiddleware(_default_service_name())
             
             await jwt_auth.authenticate(auth_req)
             await project_auth.authenticate(auth_req)
@@ -197,7 +209,7 @@ def requires_project_auth(func):
 
         # Authenticate
         auth_req = AuthenticatedRequest(request)
-        project_auth = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
+        project_auth = ProjectAuthMiddleware(_default_service_name())
         try:
             await project_auth.authenticate(auth_req)
         except Exception as e:
@@ -239,7 +251,7 @@ def requires_combined_auth(func: Callable) -> Callable:
         # Authenticate
         auth_req = AuthenticatedRequest(request)
         jwt_auth = JwtAuthMiddleware()
-        project_auth = ProjectAuthMiddleware(_DEFAULT_SERVICE_NAME)
+        project_auth = ProjectAuthMiddleware(_default_service_name())
 
         await jwt_auth.authenticate(auth_req)
         await project_auth.authenticate(auth_req)
