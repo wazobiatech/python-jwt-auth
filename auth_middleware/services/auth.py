@@ -220,3 +220,38 @@ async def clear_cache() -> None:
     _uuid_cache.pop(client_id, None)
     logger.info('[ServiceAuth] Service authentication cache cleared',
                 extra={'keys_cleared': [token_key, uuid_key]})
+
+
+# ─────────────────────────────────────────────
+# Test helpers
+# ─────────────────────────────────────────────
+#
+# These are deliberately part of the public surface so tests don't need to
+# reach into module-private state. If the cache implementation is ever
+# refactored (e.g. switched to ``cachetools.TTLCache``), only these helpers
+# need to change — tests stay decoupled.
+
+def reset_inproc_cache_for_test() -> None:
+    """Clear the in-process service token and UUID caches. Test-only."""
+    _token_cache.clear()
+    _uuid_cache.clear()
+
+
+def seed_inproc_token_for_test(client_id: str, token: str, ttl: int = 60) -> None:
+    """Pre-populate the in-process service-token cache. Test-only."""
+    _inproc_set(_token_cache, client_id, token, ttl)
+
+
+def seed_inproc_uuid_for_test(client_id: str, uuid_value: str, ttl: int = 60) -> None:
+    """Pre-populate the in-process service-UUID cache. Test-only."""
+    _inproc_set(_uuid_cache, client_id, uuid_value, ttl)
+
+
+def peek_inproc_token_for_test(client_id: str) -> Optional[str]:
+    """Return the cached service token for ``client_id``, or None. Test-only."""
+    return _inproc_get(_token_cache, client_id)
+
+
+def peek_inproc_uuid_for_test(client_id: str) -> Optional[str]:
+    """Return the cached service UUID for ``client_id``, or None. Test-only."""
+    return _inproc_get(_uuid_cache, client_id)

@@ -50,6 +50,17 @@ from .services.auth import generate_token, get_service_by_id
 
 logger = logging.getLogger(__name__)
 
+
+class AuthenticationError(Exception):
+    """
+    Raised by ``ProjectAuthMiddleware.authenticate`` for any auth failure.
+
+    Carrying a single exception type lets callers ``except AuthenticationError``
+    cleanly and stops error messages from accumulating multiple
+    ``"X: Y: Z"`` prefix layers as they bubble up.
+    """
+
+
 # Tenant ids appear in cache keys and JWKS URL paths. Restrict to a safe set
 # of characters so an attacker-controlled payload cannot inject ``:`` (key
 # collisions) or ``/`` / whitespace (path traversal) into either.
@@ -80,21 +91,29 @@ class ProjectAuthMiddleware:
         Main authentication entry-point.
         Extracts token from ``x-project-token`` header, validates it via JWKS,
         then routes by token type (platform / project / service).
+
+        Raises:
+            AuthenticationError: with a single, descriptive message — the
+                error from the failing layer is propagated as-is rather than
+                being re-wrapped with multiple prefixes.
         """
         try:
             auth_header = req.headers.get('x-project-token')
 
             if not auth_header:
-                raise Exception("No token provided, required_header: 'x-project-token'")
+                raise AuthenticationError("No token provided, required_header: 'x-project-token'")
 
             token = auth_header[7:] if auth_header.startswith('Bearer ') else auth_header
             if not token:
-                raise Exception('Empty token')
+                raise AuthenticationError('Empty token')
 
             validation = await self._validate_token(token)
 
             if not validation['is_valid']:
-                raise Exception(f"Invalid token: {validation['error']}")
+                # ``validation['error']`` is already a descriptive message
+                # from the failing layer (e.g. ``"Failed to get public key:
+                # Mercury service unavailable"``); don't add another prefix.
+                raise AuthenticationError(validation['error'])
 
             payload = validation['payload']
 
@@ -106,10 +125,15 @@ class ProjectAuthMiddleware:
             elif payload['type'] == 'service':
                 self._inject_service_context(req, ServiceTokenPayload.from_dict(payload))
             else:
-                raise Exception(f"Invalid token type: {payload.get('type')}")
+                raise AuthenticationError(f"Invalid token type: {payload.get('type')}")
 
+        except AuthenticationError:
+            # Already-typed failures pass through without re-wrapping.
+            raise
         except Exception as e:
-            raise Exception(f"Authentication service error: {str(e)}")
+            # Anything else (unexpected programming errors, etc.) becomes a
+            # generic AuthenticationError so callers always see one type.
+            raise AuthenticationError(str(e))
 
     # ─────────────────────────────────────────
     # Context injection
@@ -306,65 +330,68 @@ class ProjectAuthMiddleware:
         Determines the correct JWKS endpoint based on token type
         (service → auth/service/..., others → auth/projects/{tenant_id}/...).
         Auto-refreshes on key miss.
+
+        Errors from each step (header decode, JWKS fetch, key lookup) are
+        already descriptive and propagate as-is. We deliberately do not
+        re-wrap with a ``"Failed to get public key: …"`` prefix, because
+        ``authenticate`` will surface the same string inside an
+        ``AuthenticationError`` and stacked prefixes make production logs
+        harder to triage.
         """
-        try:
-            header = self._decode_jwt_header(token)
-            kid = header.get('kid')
-            if not kid:
-                raise Exception('Missing key ID in token header')
+        header = self._decode_jwt_header(token)
+        kid = header.get('kid')
+        if not kid:
+            raise Exception('Missing key ID in token header')
 
-            # Defense-in-depth: reject anything that does not claim RS512 in
-            # the header. ``jwt.decode`` later enforces this strictly via
-            # ``algorithms=['RS512']``, but failing fast yields clearer errors
-            # and makes the contract explicit at this layer.
-            if header.get('alg') != 'RS512':
-                raise Exception(f"Unsupported alg: {header.get('alg')}")
+        # Defense-in-depth: reject anything that does not claim RS512 in
+        # the header. ``jwt.decode`` later enforces this strictly via
+        # ``algorithms=['RS512']``, but failing fast yields clearer errors
+        # and makes the contract explicit at this layer.
+        if header.get('alg') != 'RS512':
+            raise Exception(f"Unsupported alg: {header.get('alg')}")
 
-            payload = self._decode_jwt_payload(token)
+        payload = self._decode_jwt_payload(token)
 
-            # Determine JWKS endpoint and cache key based on token type.
-            if payload.get('type') == 'service':
-                cache_key = self.service_jwks_cache_key
-                jwks_path = 'auth/service/.well-known/jwks.json'
-                logger.info('Service token detected, using service JWKS endpoint')
-            else:
-                tenant_id = payload.get('tenant_id', '')
-                if not _TENANT_ID_RE.match(tenant_id or ''):
-                    raise Exception('Invalid or missing tenant_id in token payload')
-                cache_key = f"jwks_cache:{tenant_id}"
-                jwks_path = f"auth/projects/{tenant_id}/.well-known/jwks.json"
-                logger.info(f"{payload.get('type')} token detected, tenant_id: {tenant_id}")
+        # Determine JWKS endpoint and cache key based on token type.
+        if payload.get('type') == 'service':
+            cache_key = self.service_jwks_cache_key
+            jwks_path = 'auth/service/.well-known/jwks.json'
+            logger.info('Service token detected, using service JWKS endpoint')
+        else:
+            tenant_id = payload.get('tenant_id', '')
+            if not _TENANT_ID_RE.match(tenant_id or ''):
+                raise Exception('Invalid or missing tenant_id in token payload')
+            cache_key = f"jwks_cache:{tenant_id}"
+            jwks_path = f"auth/projects/{tenant_id}/.well-known/jwks.json"
+            logger.info(f"{payload.get('type')} token detected, tenant_id: {tenant_id}")
 
-            # Check Redis for cached JWKS
-            redis = await get_redis()
-            cached_jwks = await redis.get(cache_key)
+        # Check Redis for cached JWKS
+        redis = await get_redis()
+        cached_jwks = await redis.get(cache_key)
 
-            if cached_jwks:
-                logger.info('Using cached JWKS from Redis')
-                jwks_data = cached_jwks if isinstance(cached_jwks, dict) else json.loads(cached_jwks)
+        if cached_jwks:
+            logger.info('Using cached JWKS from Redis')
+            jwks_data = cached_jwks if isinstance(cached_jwks, dict) else json.loads(cached_jwks)
 
-                # Try to find the key
-                pem = self._find_key_in_jwks(jwks_data, kid)
-                if pem:
-                    return pem
-
-                # Auto-refresh: key not found in cache
-                logger.info(f"Key {kid} not found in cache, fetching fresh JWKS")
-                jwks_data = await self._fetch_and_cache_jwks(jwks_path, cache_key)
-                pem = self._find_key_in_jwks(jwks_data, kid)
-                if not pem:
-                    raise Exception(f"Key {kid} not found even after JWKS refresh")
+            # Try to find the key
+            pem = self._find_key_in_jwks(jwks_data, kid)
+            if pem:
                 return pem
 
-            logger.info('No cached JWKS found, fetching from Mercury')
+            # Auto-refresh: key not found in cache
+            logger.info(f"Key {kid} not found in cache, fetching fresh JWKS")
             jwks_data = await self._fetch_and_cache_jwks(jwks_path, cache_key)
             pem = self._find_key_in_jwks(jwks_data, kid)
             if not pem:
-                raise Exception(f"Key {kid} not found in JWKS")
+                raise Exception(f"Key {kid} not found even after JWKS refresh")
             return pem
 
-        except Exception as e:
-            raise Exception(f"Failed to get public key: {str(e)}")
+        logger.info('No cached JWKS found, fetching from Mercury')
+        jwks_data = await self._fetch_and_cache_jwks(jwks_path, cache_key)
+        pem = self._find_key_in_jwks(jwks_data, kid)
+        if not pem:
+            raise Exception(f"Key {kid} not found in JWKS")
+        return pem
 
     async def _fetch_and_cache_jwks(self, path: str, cache_key: str) -> Dict[str, Any]:
         """Fetch JWKS from Mercury with HMAC-signed request and cache in Redis."""

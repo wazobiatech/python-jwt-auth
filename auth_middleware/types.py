@@ -231,7 +231,11 @@ class JwtPayloadSub:
 class JwtPayload:
     """
     Legacy JWT Payload structure.
-    @deprecated Use PlatformTokenPayload, ProjectTokenPayload, UserTokenPayload, or ServiceTokenPayload instead.
+
+    .. deprecated:: 2.0.0
+        Use :class:`PlatformTokenPayload`, :class:`ProjectTokenPayload`,
+        :class:`UserTokenPayload`, or :class:`ServiceTokenPayload` instead.
+        Constructing this class emits a ``DeprecationWarning``.
     """
     sub: JwtPayloadSub
     iss: str
@@ -245,6 +249,15 @@ class JwtPayload:
     scopes: Optional[List[str]] = None
     type: str = ''
     jti: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        import warnings
+        warnings.warn(
+            'JwtPayload is deprecated; use PlatformTokenPayload, ProjectTokenPayload, '
+            'UserTokenPayload, or ServiceTokenPayload instead.',
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
 
 # ==================== REQUEST TYPES ====================
