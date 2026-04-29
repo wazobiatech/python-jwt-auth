@@ -7,10 +7,8 @@ Covers:
 - Service vs. tenant-scoped JWKS endpoint routing
 - tenant_id validation in cache keys
 """
-import json
 import hmac
 import hashlib
-import time as time_mod
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -139,7 +137,7 @@ class TestJwksAutoRefresh:
              patch.object(middleware, '_fetch_and_cache_jwks', new_callable=AsyncMock, return_value=fake_jwks), \
              patch.object(middleware, '_find_key_in_jwks', return_value=None), \
              patch('auth_middleware.project_guard.get_redis', new_callable=AsyncMock, return_value=mock_redis):
-            with pytest.raises(Exception, match='Failed to get public key'):
+            with pytest.raises(Exception, match='Key kid-MISSING not found even after JWKS refresh'):
                 await middleware._get_public_key_from_cache('dummy.token.value')
 
 

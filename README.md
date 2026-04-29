@@ -427,6 +427,79 @@ The package mirrors the TypeScript implementation with Python-specific adaptatio
 - **Singleton Redis connection** manager for efficiency
 - **Decorator pattern** for clean integration
 
+## Migrating from 1.x to 2.0
+
+Version 2.0 introduces three distinct token types — **platform**, **project**, and
+**service** — each with its own payload shape and context object. The legacy
+`JwtPayload` dataclass is still exported for backward compatibility but emits a
+`DeprecationWarning` on construction; new code should use the typed payloads
+and contexts from `auth_middleware.types`.
+
+| 1.x                | 2.0 replacement                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------- |
+| `JwtPayload`       | `PlatformTokenPayload` / `ProjectTokenPayload` / `UserTokenPayload` / `ServiceTokenPayload` |
+| `req.project` dict | `ProjectContext` dataclass (also exposes `tenant_id`; `project_uuid` kept as alias)   |
+| Generic `Exception` from `authenticate()` | `AuthenticationError` — catch this single type for all auth failures |
+
+`tenant_id` is the canonical identifier going forward. `project_uuid` is
+preserved on `PlatformContext` / `ProjectContext` as an alias of `tenant_id`,
+but it is **deprecated** — migrate consumers to `tenant_id` before the next
+major bump.
+
+### Failure-mode policy
+
+Revocation lookups (Redis) follow a single configurable policy:
+
+- `REVOCATION_FAIL_OPEN=true` — if Redis is unreachable, allow the token
+  through (logs a WARNING). Use only when availability matters more than
+  revocation enforcement.
+- unset / `false` (default) — if Redis is unreachable, reject the token
+  (logs an ERROR). This is the secure default.
+
+The same policy applies to platform-token revocation, project-token
+revocation, and the project secret-version lookup.
+
+## Service-token operations
+
+Service tokens are **stateless** — they have no Redis revocation entry, so a
+leaked service token is valid until its `exp` claim. To bound the blast radius
+of a leak:
+
+- **Keep `expires_in` short.** Mercury issues service tokens with a
+  configurable lifetime; **≤ 1 hour** is recommended. Configure the local
+  cache TTL via `SERVICE_TOKEN_CACHE_TTL` (default `3300` ≈ 55 min) and never
+  set it higher than the issued lifetime.
+- **Rotate `CLIENT_SECRET` regularly.** Treat it like a database password —
+  scheduled rotation (e.g., every 90 days) plus on-demand rotation on
+  suspicion of compromise.
+
+### Emergency `CLIENT_SECRET` rotation runbook
+
+If a service's `CLIENT_SECRET` is suspected to be leaked:
+
+1. **Issue a new secret in Mercury** for the affected service. Keep the old
+   one active for now so in-flight requests don't fail mid-rotation.
+2. **Roll the new secret to all replicas** of the consuming service. Update
+   `CLIENT_SECRET` (deployment env / secret manager) and trigger a rolling
+   restart so each replica picks up the new value.
+3. **Invalidate cached tokens** on each replica. Either restart the process
+   (clears the in-process cache) or call `auth_middleware.clear_cache()` to
+   wipe both Redis and in-process caches for the service token + UUID.
+4. **Revoke the old secret in Mercury** once all replicas have cycled. Any
+   service token previously minted with the old secret is still valid until
+   its `exp`, but no new ones can be issued.
+5. **Wait out the residual window.** Tokens minted with the old secret remain
+   valid until their `exp` claim — this is why short `expires_in` matters.
+   For a high-severity leak, consider rotating the **JWKS signing key** in
+   Mercury as well; that invalidates every outstanding service token
+   immediately at the cost of forcing every consumer to refetch JWKS.
+6. **Audit logs** for any use of the old secret after step 4. Anything logged
+   after rotation indicates a stale replica or external consumer that missed
+   the roll.
+
+Platform and project tokens have Redis-backed revocation entries and can be
+revoked individually via the standard Mercury revocation flow.
+
 ## License
 
 MIT

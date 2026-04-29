@@ -6,7 +6,7 @@ Supports Flask, FastAPI, and GraphQL.
 """
 
 from .jwt_guard import JwtAuthMiddleware
-from .project_guard import ProjectAuthMiddleware
+from .project_guard import ProjectAuthMiddleware, AuthenticationError
 from .graphql_helper import (
     GraphQLAuthHelper,
     project_auth_required,
@@ -59,6 +59,7 @@ __all__ = [
     # Core middleware
     'JwtAuthMiddleware',
     'ProjectAuthMiddleware',
+    'AuthenticationError',
     
     # GraphQL helpers
     'GraphQLAuthHelper',

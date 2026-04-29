@@ -13,11 +13,9 @@ from auth_middleware.services import auth as svc_auth
 @pytest.fixture(autouse=True)
 def _reset_inproc_caches():
     """Reset the module-level in-process caches before/after each test."""
-    svc_auth._token_cache.clear()
-    svc_auth._uuid_cache.clear()
+    svc_auth.reset_inproc_cache_for_test()
     yield
-    svc_auth._token_cache.clear()
-    svc_auth._uuid_cache.clear()
+    svc_auth.reset_inproc_cache_for_test()
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +34,7 @@ class TestGenerateToken:
     @pytest.mark.asyncio
     async def test_inproc_cache_hit_skips_redis_and_mercury(self):
         """In-process cache hit returns immediately without touching Redis or Mercury."""
-        svc_auth._inproc_set(svc_auth._token_cache, 'client-001', 'inproc-token', 60)
+        svc_auth.seed_inproc_token_for_test('client-001', 'inproc-token')
 
         with patch('auth_middleware.services.auth.get_redis') as mock_get_redis, \
              patch('auth_middleware.services.auth.create_graphql_client') as mock_client:
@@ -59,7 +57,7 @@ class TestGenerateToken:
         assert result == 'redis-token'
         mock_client.assert_not_called()
         # Second call should now hit the in-process cache
-        assert svc_auth._inproc_get(svc_auth._token_cache, 'client-001') == 'redis-token'
+        assert svc_auth.peek_inproc_token_for_test('client-001') == 'redis-token'
 
     @pytest.mark.asyncio
     async def test_cache_miss_calls_mercury_and_caches_result(self):
@@ -81,7 +79,7 @@ class TestGenerateToken:
         mock_client.mutate_async.assert_awaited_once()
         mock_redis.set.assert_awaited_once()
         # In-process cache populated
-        assert svc_auth._inproc_get(svc_auth._token_cache, 'client-001') == 'fresh-token'
+        assert svc_auth.peek_inproc_token_for_test('client-001') == 'fresh-token'
 
     @pytest.mark.asyncio
     async def test_mercury_returns_no_data_raises(self):
@@ -113,7 +111,7 @@ class TestGetServiceById:
 
     @pytest.mark.asyncio
     async def test_inproc_cache_hit_skips_redis_and_mercury(self):
-        svc_auth._inproc_set(svc_auth._uuid_cache, 'client-001', 'svc-uuid-cached', 60)
+        svc_auth.seed_inproc_uuid_for_test('client-001', 'svc-uuid-cached')
 
         with patch('auth_middleware.services.auth.get_redis') as mock_get_redis, \
              patch('auth_middleware.services.auth.create_graphql_client') as mock_client:
@@ -134,7 +132,7 @@ class TestGetServiceById:
 
         assert result == 'redis-uuid'
         mock_client.assert_not_called()
-        assert svc_auth._inproc_get(svc_auth._uuid_cache, 'client-001') == 'redis-uuid'
+        assert svc_auth.peek_inproc_uuid_for_test('client-001') == 'redis-uuid'
 
     @pytest.mark.asyncio
     async def test_cache_miss_calls_mercury_with_auth_header(self):
@@ -181,8 +179,8 @@ class TestClearCache:
     @pytest.mark.asyncio
     async def test_clears_redis_and_inproc(self):
         """clear_cache wipes both Redis keys and in-process entries."""
-        svc_auth._inproc_set(svc_auth._token_cache, 'client-001', 'tok', 60)
-        svc_auth._inproc_set(svc_auth._uuid_cache, 'client-001', 'uuid', 60)
+        svc_auth.seed_inproc_token_for_test('client-001', 'tok')
+        svc_auth.seed_inproc_uuid_for_test('client-001', 'uuid')
 
         mock_redis = AsyncMock()
         mock_redis.delete = AsyncMock(return_value=True)
@@ -197,5 +195,5 @@ class TestClearCache:
         assert 'service_uuid:client-001' in delete_keys
 
         # In-process caches cleared
-        assert svc_auth._inproc_get(svc_auth._token_cache, 'client-001') is None
-        assert svc_auth._inproc_get(svc_auth._uuid_cache, 'client-001') is None
+        assert svc_auth.peek_inproc_token_for_test('client-001') is None
+        assert svc_auth.peek_inproc_uuid_for_test('client-001') is None
